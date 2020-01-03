@@ -158,6 +158,7 @@ def generatePara(test_loader, mode):
             for instance in data:
                 instance = instance.unsqueeze(dim=0)
                 mu, logvar = model.encode(instance, adj)
+                mu, logvar = mu.unsqueeze(dim=0), logvar.unsqueeze(dim=0)
                 mu_hat = model.decode(mu, adj)
                 mse, kld, loss = loss_function(mu_hat, instance, mu, logvar)
                 loss = mse
