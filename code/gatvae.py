@@ -48,76 +48,33 @@ class KDD99(Dataset):
         return len(self.instances)
 
 
-def mape_vectorized_v2(a, b): 
-    mask = a != 0
-    return (np.fabs(a.numpy() - b.numpy())/a.numpy())[mask].mean()
-
-
-class GraphDiffusionConvolution(Module):
-    def __init__(self, in_features, out_features, k=2, bias=True):
-        super(GraphDiffusionConvolution, self).__init__()
-        self.in_features = in_features
-        self.out_features = out_features
-        self.weight = Parameter(torch.FloatTensor(in_features, out_features))
-        if bias:
-            self.bias = Parameter(torch.FloatTensor(out_features))
-        else:
-            self.register_parameter('bias', None)
-        self.k = k
-        self.reset_parameters()
-        
-    def reset_parameters(self):
-        stdv = 1. / math.sqrt(self.in_features*self.k)
-        self.weight.data.uniform_(-stdv, stdv)
-        if self.bias is not None:
-            self.bias.data.uniform_(-stdv, stdv)
-
-    def graph_diffusion_convolution_fn(self, inputs, adj, weight, bias=None, k=2):
-        inputs = inputs.unsqueeze(dim=2)
-
-        batch_size = inputs.shape[0]
-        support = torch.bmm(inputs, weight.expand(batch_size, -1, -1))
-        output = support.clone()
-        adj_ = adj
-        for i in range(k):
-            output += torch.bmm(adj_.expand(batch_size, -1, -1), support)
-            adj_ = torch.spmm(adj_, adj)
-        if bias is not None:
-            output = output + bias
-        output = output.squeeze(dim=2)
-        return output
-    
-    def forward(self, inputs, DW):
-        return self.graph_diffusion_convolution_fn(inputs, DW, self.weight, self.bias, self.k)
-    
-    def __repr__(self):
-        return self.__class__.__name__ + ' (' \
-               + str(self.in_features) + ' -> ' \
-               + str(self.out_features) + ')'
-
-
-class VAE(nn.Module):
-    def __init__(self, nodeNum, in_features, out_features, k=2, bias=True):
-        super(VAE, self).__init__()
+class GATVAE(nn.Module):
+    def __init__(self, nodeNum, hidden_features, latent_feature):
+        super(GATVAE, self).__init__()
         self.nodeNum = nodeNum
-        self.gat1 = GAT(nodeNum)
-        self.fc1 = nn.Linear(nodeNum,  60) 
-        self.fc2 = nn.Linear(60,  30)
-        self.fc3 = nn.Linear(30,  10) # 10
-        self.fc41 = nn.Linear(10, 5) # 10,5
-        self.fc42 = nn.Linear(10, 5)
-        self.fc5 = nn.Linear(5, 10)
-        self.fc6 = nn.Linear(10, 30)
-        self.fc7 = nn.Linear(30, 60)
-        self.fc8 = nn.Linear(60, nodeNum) 
-        self.gat2 = GAT(nodeNum)
+        self.gat_in = GAT(nodeNum)
+
+        self.encode_net = [nn.Linear(nodeNum, hidden_features[0]), nn.ReLU()]
+        for i in range(len(hidden_features)-1):
+            self.encode_net.extend([nn.Linear(hidden_features[i], hidden_features[i+1]), nn.ReLU()])
+        self.encode_net.extend([nn.Linear(hidden_features[-1], latent_feature), nn.ReLU()])
+        self.encode_net = nn.Sequential(*self.encode_net)
+
+        self.mu = nn.Linear(latent_feature, latent_feature)
+        self.sigma = nn.Linear(latent_feature, latent_feature)
+
+        self.decode_net = [nn.Linear(latent_feature, hidden_features[-1]), nn.ReLU()]
+        for i in range(len(hidden_features)-1):
+            self.decode_net.extend([nn.Linear(hidden_features[len(hidden_features)-i-1], hidden_features[len(hidden_features)-i-2]), nn.ReLU()])
+        self.decode_net.extend([nn.Linear(hidden_features[0], nodeNum), nn.ReLU()])
+        self.decode_net = nn.Sequential(*self.decode_net)
+
+        self.gat_out = GAT(nodeNum)
 
     def encode(self, x, adj):
-        filter_x = self.gat1(x, adj)
-        h1 = F.relu(self.fc1(filter_x))
-        h2 = F.relu(self.fc2(h1))
-        h3 = F.relu(self.fc3(h2))
-        return self.fc41(h3), self.fc42(h3)
+        h = self.gat_in(x, adj)
+        h = self.encode_net(h)
+        return self.mu(h), self.sigma(h)
 
     def reparameterize(self, mu, logvar):
         std = torch.exp(0.5*logvar)
@@ -125,11 +82,8 @@ class VAE(nn.Module):
         return mu + eps*std
 
     def decode(self, z, adj):
-        h5 = F.relu(self.fc5(z))
-        h6 = F.relu(self.fc6(h5))
-        h7 = F.relu(self.fc7(h6))
-        re_x = self.fc8(h7)
-        return self.gat2(re_x, adj)
+        h = self.decode_net(z)
+        return self.gat_out(h, adj)
 
     def forward(self, x, adj):
         mu, logvar = self.encode(x, adj)
@@ -171,7 +125,7 @@ def train(epoch):
     print('====> Epoch: {} Average loss: {:.4f}'.format(
           epoch, train_loss / len(train_loader.dataset)))
 
-def test(epoch):
+def test(epoch, test_loader):
     test_loss = 0
 
     fin_mu = []
@@ -193,7 +147,7 @@ def test(epoch):
     return fin_mu, fin_logvar
 
 
-def generatePara():
+def generatePara(test_loader, mode):
     
     model.eval()
     fin_mu = []
@@ -211,8 +165,8 @@ def generatePara():
                 std = std
                 fin_mu.append(loss.tolist())
                 fin_std.append(std.tolist())
-    np.save(datadir + 'mu_loss.npy', np.array(fin_mu))
-    np.save(datadir + 'std.npy', np.array(fin_std))
+    np.save(datadir + mode + '_mu_loss.npy', np.array(fin_mu))
+    np.save(datadir + mode + '_std.npy', np.array(fin_std))
 
 
 def get_data(model):
@@ -223,7 +177,7 @@ if __name__ == "__main__":
     datadir = '../data/kddcup99/'
     parser = argparse.ArgumentParser(description='VAE MNIST Example')
     parser.add_argument('--batch-size', type=int, default=1024, metavar='N', help='input batch size for training (default: 1024)')
-    parser.add_argument('--epochs', type=int, default=100, metavar='N',help='number of epochs to train (default: 100)')
+    parser.add_argument('--epochs', type=int, default=5, metavar='N',help='number of epochs to train (default: 100)')
     parser.add_argument('--no-cuda', action='store_true', default=False,help='enables CUDA training')
     parser.add_argument('--seed', type=int, default=1, metavar='S',help='random seed (default: 1)')
     parser.add_argument('--log-interval', type=int, default=10, metavar='N',help='how many batches to wait before logging training status')
@@ -239,12 +193,16 @@ if __name__ == "__main__":
 
     train_instances = np.load(datadir + 'X_train.npy')
     train_labels = np.load(datadir + 'y_train.npy')
-    test_instances = np.load(datadir + 'X_test.npy')
-    test_labels = np.load(datadir + 'y_test.npy')
+
+    test_anomaly_instances = np.load(datadir + 'X_test_anomaly.npy')
+    test_anomaly_labels = np.load(datadir + 'y_test_anomaly.npy')
+
+    test_normal_instances = np.load(datadir + 'X_test_normal.npy')
+    test_normal_labels = np.load(datadir + 'y_test_normal.npy')
+
     nodeNum = train_instances.shape[1]
 
     graph_data = np.load(datadir + 'kdd99weight.npy')
-    # graph_data = graph_data + graph_data.T
     graph_data += np.eye(graph_data.shape[0])
     graph_data = np.nan_to_num(graph_data)
     G = create_graph(graph_data[:nodeNum, :nodeNum])
@@ -253,16 +211,22 @@ if __name__ == "__main__":
     adj.requires_grad = False
 
     train_dataset = KDD99(torch.FloatTensor(train_instances))
-    test_dataset = KDD99(torch.FloatTensor(test_instances))
+    test_anomaly_dataset = KDD99(torch.FloatTensor(test_anomaly_instances))
+    test_normal_dataset = KDD99(torch.FloatTensor(test_normal_instances))
+
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, **kwargs)
-    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=True, **kwargs)
+    test_anomaly_loader = DataLoader(test_anomaly_dataset, batch_size=args.batch_size, shuffle=True, **kwargs)
+    test_normal_loader = DataLoader(test_normal_dataset, batch_size=args.batch_size, shuffle=True, **kwargs)
+
     print('data prepared!\n')
 
-    model = VAE(nodeNum, 1, 1).to(device)
+    model = GATVAE(nodeNum, [60, 30, 10], 5).to(device)
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
 
     for epoch in range(1, args.epochs + 1):
         train(epoch)
-        test(epoch)
-    # generatePara()
+        test(epoch, test_anomaly_loader)
+        test(epoch, test_normal_loader)
+    generatePara(test_anomaly_loader, 'anomaly')
+    generatePara(test_normal_loader, 'normal')
 
