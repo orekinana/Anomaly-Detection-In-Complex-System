@@ -27,10 +27,10 @@ class anomalyScore(Dataset):
     def __len__(self):
         return len(self.instances)
 
-train_instances = np.load('../data/activity/training_data.npy')
-train_labels = np.load('../data/activity/traning_label.npy')
-test_instances = np.load('../data/activity/testing_data.npy')
-test_labels = np.load('../data/activity/testing_label.npy')
+train_instances = np.load('../data/kddcup99/training_data.npy')
+train_labels = np.load('../data/kddcup99/traning_label.npy')
+test_instances = np.load('../data/kddcup99/testing_data.npy')
+test_labels = np.load('../data/kddcup99/testing_label.npy')
 nodeNum = train_instances.shape[1]
 
 train_dataset = anomalyScore(torch.FloatTensor(train_instances), torch.LongTensor(train_labels))
@@ -39,7 +39,7 @@ test_dataset = anomalyScore(torch.FloatTensor(test_instances), torch.LongTensor(
 parser = argparse.ArgumentParser(description='VAE MNIST Example')
 parser.add_argument('--batch-size', type=int, default=1024, metavar='N',
                     help='input batch size for training (default: 1024)')
-parser.add_argument('--epochs', type=int, default=20, metavar='N',
+parser.add_argument('--epochs', type=int, default=50, metavar='N',
                     help='number of epochs to train (default: 100)')
 parser.add_argument('--no-cuda', action='store_true', default=False,
                     help='enables CUDA training')
@@ -56,20 +56,20 @@ device = torch.device("cuda" if args.cuda else "cpu")
 
 kwargs = {'num_workers': 1, 'pin_memory': True} if args.cuda else {}
 
-train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, **kwargs)
-test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch_size, shuffle=True, **kwargs)
+train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, shuffle=False, **kwargs)
+test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, **kwargs)
 
 print('data prepared!\n')
 
 class Model1(nn.Module):
-    def __init__(self, nodeNum):
+    def __init__(self, nodeNum, outputs):
         super(Model1, self).__init__()
         self.nodeNum = nodeNum
         self.bn = nn.BatchNorm1d(self.nodeNum)
         self.fc1 = nn.Linear(self.nodeNum, self.nodeNum // 2)
         self.fc2 = nn.Linear(self.nodeNum // 2, self.nodeNum // 4)
-        self.fc3 = nn.Linear(self.nodeNum // 4, 10) #50
-        self.fc4 = nn.Linear(10, 5) #18
+        self.fc3 = nn.Linear(self.nodeNum // 4, outputs[0])
+        self.fc4 = nn.Linear(outputs[0], outputs[1])
     
     def embedding(self, x):
         h1 = torch._C._nn.elu(self.fc1(self.bn(x)))
@@ -81,12 +81,12 @@ class Model1(nn.Module):
         return self.embedding(x)
 
 class Model2(nn.Module):
-    def __init__(self, nodeNum):
+    def __init__(self, nodeNum, output):
         super(Model2, self).__init__()
         self.nodeNum = nodeNum
         self.bn = nn.BatchNorm1d(self.nodeNum)
         self.fc1 = nn.Linear(self.nodeNum, self.nodeNum // 2)
-        self.fc2 = nn.Linear(self.nodeNum // 2, 2)
+        self.fc2 = nn.Linear(self.nodeNum // 2, output)
     
     def embedding(self, x):
         h1 = torch._C._nn.elu(self.fc1(self.bn(x)))
@@ -96,14 +96,14 @@ class Model2(nn.Module):
         return self.embedding(x)
 
 class Score(nn.Module):
-    def __init__(self, nodeNum1, nodeNum2):
+    def __init__(self, nodeNum1, nodeNum2, m1out, m2in, scorein):
         super(Score, self).__init__()
         self.nodeNum1 = nodeNum1
         self.nodeNum2 = nodeNum2
-        self.embedding1 = Model1(self.nodeNum1)
-        self.embedding2 = Model2(self.nodeNum2)
-        self.bn = nn.BatchNorm1d(7) #20
-        self.fc1 = nn.Linear(7,  4)
+        self.embedding1 = Model1(self.nodeNum1, m1out)
+        self.embedding2 = Model2(self.nodeNum2, m2in)
+        self.bn = nn.BatchNorm1d(scorein)
+        self.fc1 = nn.Linear(scorein,  4)
         self.fc2 = nn.Linear(4,  2)
 
     def classification(self, x):
@@ -119,8 +119,30 @@ class Score(nn.Module):
     def forward(self, x):
         return self.classification(x)
 
+class ScoreWithoutSigma(nn.Module):
+    def __init__(self, nodeNum1, m1out, scorein):
+        super(ScoreWithoutSigma, self).__init__()
+        self.nodeNum1 = nodeNum1
+        self.embedding1 = Model1(self.nodeNum1, m1out)
+        self.connect = nn.Linear(m1out[-1], scorein)
+        self.bn = nn.BatchNorm1d(scorein)
+        self.fc1 = nn.Linear(scorein,  4)
+        self.fc2 = nn.Linear(4,  2)
 
-model = Score(121, 5).to(device) #kdd99 5-2 8epoch for result 10epoch for picture shuffle=true
+    def classification(self, x):
+        h1 = torch._C._nn.elu(self.embedding1(x[:,:self.nodeNum1]))
+        h3 = torch._C._nn.elu(self.connect(h1))
+        h4 = torch._C._nn.elu(self.fc1(self.bn(h3)))        
+        return F.softmax(self.fc2(h4))
+
+
+    def forward(self, x):
+        return self.classification(x)
+
+kdd = {'m1':[50, 20], 'm2':2, 'score':22}
+model = Score(121, 5, kdd['m1'], kdd['m2'], kdd['score']).to(device) #kdd99 5-2 8epoch for result 10epoch for picture shuffle=true
+# model = ScoreWithoutSigma(121, kdd['m1'], kdd['score']).to(device) #kdd99 5-2 8epoch for result 10epoch for picture shuffle=true
+
 # model = Score(41, 5).to(device) #letter 5-2 400epoch for result 1000epoch for picture shuffle=false
 # model = Score(18, 5).to(device) #thyroid 5-2 500epoch for result 500epoch for picture shuffle=false
 criterion = nn.CrossEntropyLoss()
@@ -164,8 +186,8 @@ def test(epoch):
     test_loss /= len(test_loader.dataset)
     value, pred = torch.max(pred, dim=1)
     true = len(np.where((pred - observe).numpy() == 0)[0])
-    observe_anomaly = set(np.where(observe.numpy() == 0)[0])
-    predict_anomaly = set(np.where(pred.numpy() == 0)[0])
+    observe_anomaly = set(np.where(observe.numpy() == 1)[0])
+    predict_anomaly = set(np.where(pred.numpy() == 1)[0])
     print(len(observe_anomaly), len(predict_anomaly), len(predict_anomaly & observe_anomaly))
     if len(observe_anomaly) == 0 or len(predict_anomaly) == 0 or len(predict_anomaly & observe_anomaly) == 0:
         return
